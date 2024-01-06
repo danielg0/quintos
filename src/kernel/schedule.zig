@@ -14,18 +14,21 @@ const pool = @import("memory_pool.zig");
 const process = @import("process.zig");
 const StructList = @import("struct_list.zig").StructList;
 
-// memory-pool allocators for allocating process structs
-// we allocate them from a fixed buffer in kernel space, which puts a maximum
-// limit on the number of processes that can exist at once
-const MAX_PROC = 4096;
-// proc_buf is public so we can check process pointers point inside it
-var procs = [_]u8{0} ** (@sizeOf(process.Process) * MAX_PROC);
-// TODO: replace with standard library memory pool
-pub var fba: std.heap.FixedBufferAllocator = undefined;
-var proc_allocator: pool.MemoryPoolAligned(process.Process, std.mem.page_size) = undefined;
-
-// struct list storing every alive process on the os
-var all = StructList{};
+// we have a global array of processes
+const MAX_PROC = std.math.maxInt(process.Id);
+// array storing all processes
+// each entry is either:
+// - an alive process
+// - an integer holding the index of the next unused slot
+// - an "empty" initial value (meaning the next slot is the next unused)
+const ProcSlot = union(enum) {
+    alive: process.Process,
+    next: process.Id,
+    empty,
+};
+var procs = [_]ProcSlot{ProcSlot{ .empty = {} }} ** MAX_PROC;
+// the smallest index into procs that isn't being used
+var next_id: process.Id = 0;
 
 // struct ready lists
 // three for the three different priorities of process (driver/server/user)
@@ -42,12 +45,7 @@ var idle: *process.Process = undefined;
 // initialise scheduling system
 // create ready lists, setup allocators
 pub fn init() !void {
-    // setup allocators
-    fba = std.heap.FixedBufferAllocator.init(&procs);
-    proc_allocator = @TypeOf(proc_allocator).init(fba.allocator());
-
     // initialise all StructLists
-    all.init();
     driver.init();
     server.init();
     user.init();
@@ -76,10 +74,18 @@ pub fn create(name: []const u8, binary: []const u8) !*process.Process {
 }
 // create with some extra mappings
 pub fn createMapped(name: []const u8, binary: []const u8, mappings: []const Mapping) !*process.Process {
-    // allocate memory for a new process
-    // deferror prevents memory leaks on failure
-    const proc = try proc_allocator.create();
-    errdefer proc_allocator.destroy(proc);
+    // find an entry in the procs array for the new process
+    const id = next_id;
+    switch (procs[id]) {
+        ProcSlot.alive => return error.HitProcessLimit,
+        ProcSlot.next => |n| next_id = n,
+        ProcSlot.empty => next_id += 1,
+    }
+    // on failure push unused id back
+    errdefer {
+        procs[id] = ProcSlot{ .next = next_id };
+        next_id = id;
+    }
 
     // try to allocate a root page table for it
     const pt = try paging.createRoot();
@@ -95,16 +101,15 @@ pub fn createMapped(name: []const u8, binary: []const u8, mappings: []const Mapp
     }
 
     // write initial values to process struct
-    proc.* = .{
-        .id = 0, // TODO: replace with atomic incrementing integer
+    procs[id] = ProcSlot{ .alive = .{
+        .id = id,
         .name = process.name(name),
         .state = .READY,
         .page_table = pt,
         .pc = entry,
-    };
+    } };
+    const proc = &procs[id].alive;
 
-    // push to the all process and ready lists
-    all.pushBack(&proc.allelem);
     // TODO: switch based on type of process
     user.pushBack(&proc.elem);
 
@@ -113,29 +118,30 @@ pub fn createMapped(name: []const u8, binary: []const u8, mappings: []const Mapp
 
 // delete a process, freeing its memory
 pub fn destroy(proc: *process.Process) void {
-    assert(fba.ownsPtr(@ptrCast(proc)));
     assert(proc.magic == process.MAGIC);
+    assert(&procs[proc.id].alive == proc);
 
     // remove from ready lists
     // if state is running or dying (which is only set by a running process that
     // dies after trapping)
     if (proc.state != .RUNNING and proc.state != .DYING)
         proc.elem.remove();
-    proc.allelem.remove();
 
     // free page table and user pages
     paging.destroy(proc.page_table);
 
     // free process struct memory
-    proc_allocator.destroy(@alignCast(proc));
+    const freed_id = proc.id;
+    procs[proc.id] = ProcSlot{ .next = next_id };
+    next_id = freed_id;
 }
 
 // get the next process to run
 // round robin of all the struct ready lists prioritizing driver processes over
 // server processes over user processes
 pub fn next(curr: *process.Process) *process.Process {
-    assert(fba.ownsPtr(@ptrCast(curr)));
     assert(curr.magic == process.MAGIC);
+    assert(&procs[curr.id].alive == curr);
 
     if (curr != idle) {
         // what we do with the process depends on it's state
@@ -189,7 +195,6 @@ pub fn unblockID(id: u32) !void {
 }
 // unblock a process
 pub fn unblock(proc: *process.Process) void {
-    assert(fba.ownsPtr(proc));
     assert(proc.magic == process.MAGIC);
     assert(proc.state == .BLOCKED);
 

@@ -110,9 +110,10 @@ fn trap_stub() align(4) callconv(.Naked) noreturn {
     //
     // In riscv, when we're in user mode, any interrupt x traps to machine mode
     // so long as the xth bit is set in the mie csr. When in machine mode, it's
-    // controlled by the MIE flag in the mstatus csr If we leave it unset, that
+    // controlled by the MIE flag in the mstatus csr. If we leave it unset, that
     // means we'll never interrupt whilst handling an interrupt, as we handle
     // traps in machine mode.
+    // ie. interrupts are always disabled in the kernel
     //
     // We still need to handle exceptions that occur whilst handling the trap,
     // but they shouldn't occur in bug-free handlers, so we'll just panic

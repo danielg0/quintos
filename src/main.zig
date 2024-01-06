@@ -68,6 +68,8 @@ fn kinit() !noreturn {
     _ = try schedule.createMapped("hello", @embedFile("user/programs/hello"), &user_uart);
     // a fibonacci C program
     const fib = try schedule.createMapped("fib", @embedFile("user/programs/fibonacci"), &user_uart);
+    // a zig program that makes system calls
+    _ = try schedule.createMapped("syscall", @embedFile("user/programs/syscall"), &user_uart);
 
     // setup done, display welcome message
     std.log.info("Welcome to QuartOS", .{});

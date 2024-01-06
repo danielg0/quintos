@@ -7,6 +7,9 @@ const log = std.log.scoped(.process);
 const NAME_LEN = 16;
 const Name = [NAME_LEN]u8;
 
+// unique, kernel-wide identifier for each process
+pub const Id = u8;
+
 pub const MAGIC = 0x242;
 
 // define riscv registers saved
@@ -54,10 +57,11 @@ pub const Process = struct {
         READY,
         BLOCKED,
         DYING,
+        DEAD, // when dead a process' pc is the next free id number
     };
 
     // unique, kernel-wide identifier for this process
-    id: u16,
+    id: Id,
     name: Name,
     state: State,
 
@@ -73,7 +77,6 @@ pub const Process = struct {
     fault_cause: usize = 0,
 
     // list elements for the all processes and ready/blocked lists
-    allelem: StructList.Elem = .{},
     elem: StructList.Elem = .{},
 
     // pointer to this process' root page table
